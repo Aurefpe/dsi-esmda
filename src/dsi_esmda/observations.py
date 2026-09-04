@@ -221,11 +221,11 @@ def _resolve_times(times):
         stop = times.get("stop")
         if stop is None:
             # "stop: null" means "to the end of the runs", which only the
-            # caller that has the data can work out. dsi_esmda.run_study
+            # caller that has the data can work out. run_dsi_esmda
             # fills it in from the ensemble before we ever get here.
             raise ValueError(
                 "'stop: null' in a times grid means 'to the end of the runs', "
-                "and only dsi_esmda.run_study can work that out (it reads the "
+                "and only run_dsi_esmda can work that out (it reads the "
                 "ensemble first). If you are calling the API directly, give a "
                 "number, or build the grid yourself with "
                 "observations.time_grid(start, stop, step)."
@@ -1259,7 +1259,7 @@ def load_observations(source, config_path, section=SECTION):
 
     Example
     -------
-        from observations import load_observations
+        from dsi_esmda.observations import load_observations
 
         obs = load_observations("TRUE.RSM", "study_config.json")
         d_obs, Cd = obs.vector, obs.Cd          # arrays for ES-MDA
@@ -1407,14 +1407,12 @@ _RSM_MODULE_NAMES = ("rsm_reader", "RSM_Reader", "RSM_reader", "rsm_Reader",
 
 
 def _import_rsm_file_class():
-    """Import RSMFile from this package."""
-
+    """Import the RSM reader included in this package."""
     try:
         from .rsm_reader import RSMFile
     except ImportError as error:
         raise ImportError(
-            "Could not import RSMFile from "
-            "dsi_esmda.rsm_reader."
+            "Could not import RSMFile from dsi_esmda.rsm_reader."
         ) from error
 
     return RSMFile
@@ -1745,53 +1743,3 @@ def describe_source(source):
               + (", ..." if len(times) > 20 else "")]
     print("\n".join(lines))
     return names, times
-
-
-# ===========================================================================
-# Runs only when you execute this file directly:
-#     python observations.py TRUE.RSM study_config.json
-# ===========================================================================
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  python observations.py <truth.RSM | data.csv> <config.yaml>")
-        print("      build d_obs and write d_obs.csv + d_obs_vector.csv")
-        print("  python observations.py --list <truth.RSM | data.csv>")
-        print("      show the columns and times you can put in the config")
-        print("  python observations.py --template [truth|file|minimal] "
-              "[out.yaml]")
-        print("      write a commented starter config")
-        sys.exit(1)
-
-    if sys.argv[1] == "--list":
-        if len(sys.argv) < 3:
-            print("Usage: python observations.py --list <source>")
-            sys.exit(1)
-        describe_source(sys.argv[2])
-        sys.exit(0)
-
-    if sys.argv[1] in ("--template", "--example-config"):
-        rest = sys.argv[2:]
-        kind = "truth"
-        if rest and rest[0] in ("truth", "file", "minimal"):
-            kind, rest = rest[0], rest[1:]
-        target = rest[0] if rest else "study_config.yaml"
-        print("Wrote", write_example_config(target, kind=kind))
-        sys.exit(0)
-
-    if len(sys.argv) < 3:
-        print("Usage: python observations.py <source> <config>")
-        sys.exit(1)
-
-    data_path, config_path = sys.argv[1], sys.argv[2]
-    obs = load_observations(data_path, config_path)
-
-    print(obs.summary())
-    print("\nvector_table (the map of d_obs):")
-    print(obs.vector_table.head(8).to_string(index=False))
-    print(f"\nvector {obs.vector.shape}   Cd {obs.Cd.shape}")
-    print("Saved:", obs.to_csv(Path(data_path).with_name("d_obs.csv")))
-    print("Saved:", obs.to_vector_csv(
-        Path(data_path).with_name("d_obs_vector.csv")))

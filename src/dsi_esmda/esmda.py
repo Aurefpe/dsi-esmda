@@ -403,16 +403,16 @@ class DSIResult:
         measured data, in which case there is nothing to compare against).
 
         `truth` may be given explicitly - a path, a DataFrame or an RSMFile -
-        otherwise the truth case recorded by run_study() is used.
+        otherwise the truth source stored in this result is used.
         """
         source = truth if truth is not None else self.truth_source
         if source is None:
             return None
 
-        from observations import _as_dataframe, values_at_times
+        from .observations import _as_dataframe, values_at_times
         table = _as_dataframe(source)
 
-        from observations import _match_column
+        from .observations import _match_column
         found = _match_column(name, list(table.columns))
         # Draw truth only where truth data actually exist.  ObservationSet
         # stores the selected history points (for example 150..660 days),
@@ -572,12 +572,12 @@ def _as_esmda_config(config, section="esmda"):
 
 def _grid_from_settings(prior, obs, settings, config_folder, verbose=True):
     """Work out (columns, times, match, tolerance) from the config's
-    "prior" section, exactly as run_study does.
+    "prior" section.
 
     Used when you hand run_dsi_esmda a PriorEnsemble and a config file: the
     grid is described in the config, so nothing has to be passed by hand.
     """
-    from observations import _load_list, _resolve_times
+    from .observations import _load_list, _resolve_times
 
     def resolve(value):
         candidate = Path(str(value))
@@ -962,7 +962,7 @@ def _observation_rows(columns, times, obs):
 
 
 # ===========================================================================
-# The whole study, driven by the config file
+# Configuration helper used by ESMDAConfig and run_dsi_esmda
 # ===========================================================================
 def _read_config(path):
     path = Path(path)
@@ -977,373 +977,3 @@ def _read_config(path):
         return yaml.safe_load(text)
     return json.loads(text)
 
-
-def run_study(config_path, verbose=True):
-    """Run the whole thing from one config file. Returns a DSIResult.
-
-        result = run_study("study_config.yaml")
-
-    Sections used:
-        prior         folder / pattern / times / columns
-        observations  read by observations.py
-        esmda         the assimilation settings
-        truth         path to the truth RSM        (perturbed into d_obs)
-        observations_file  path to measured data   (used as-is)
-        output        folder / prefix
-    """
-    settings = _read_config(config_path)
-    config_folder = Path(config_path).resolve().parent
-
-    def resolve(value):
-        """Make a path in the config relative to the config file itself."""
-        candidate = Path(str(value))
-        return candidate if candidate.is_absolute() else config_folder / candidate
-
-    def resolve_data_file(value, suffixes, what):
-        """Resolve a path that may be a file OR a folder holding one file.
-
-        Real projects keep the truth case in its own folder, so
-        `truth: "True_model"` should work as well as
-        `truth: "True_model/TRUE.RSM"`. If the folder holds exactly one
-        matching file we use it; if it holds several we say which, rather
-        than picking one at random.
-        """
-        path = resolve(value)
-        if path.is_file():
-            return path
-        if not path.is_dir():
-            raise FileNotFoundError(
-                f"The config's {what} is {value!r}, which is neither a file "
-                f"nor a folder (looked in {path})."
-            )
-
-        found = sorted(candidate for candidate in path.iterdir()
-                       if candidate.is_file()
-                       and candidate.suffix.lower() in suffixes)
-        if not found:
-            raise FileNotFoundError(
-                f"The {what} folder {path} holds no {'/'.join(suffixes)} file. "
-                f"It holds: {[c.name for c in list(path.iterdir())[:8]]}"
-            )
-        if len(found) > 1:
-            raise ValueError(
-                f"The {what} folder {path} holds {len(found)} candidate files "
-                f"({[c.name for c in found[:6]]}). Name the one you want, "
-                f"e.g. {what}: \"{Path(value) / found[0].name}\"."
-            )
-        return found[0]
-
-    # ---- prior -----------------------------------------------------------
-    prior_settings = dict(settings.get("prior") or {})
-    folder = prior_settings.get("folder")
-    if folder is None:
-        raise KeyError(
-            "The config needs a 'prior' section with a 'folder', e.g.\n"
-            "  prior:\n    folder: Priors\n    pattern: 'Model*.RSM'"
-        )
-    pattern = prior_settings.get("pattern", "*.RSM")
-
-    if verbose:
-        print("=" * 68)
-        print("1. prior ensemble")
-        print("=" * 68)
-    prior = PriorEnsemble.from_folder(resolve(folder), pattern)
-    if verbose:
-        print(prior)
-        print("member order:", ", ".join(prior.names[:5]),
-              "..." if len(prior) > 5 else "")
-
-    # ---- observations ----------------------------------------------------
-    if verbose:
-        print()
-        print("=" * 68)
-        print("2. observations")
-        print("=" * 68)
-
-    # How a wanted time grid is lined up with the times the simulator really
-    # reported. It is set once, in the prior section, and the observations
-    # inherit it unless they say otherwise - so both sides of the comparison
-    # are always sampled the same way.
-    grid_spec = prior_settings.get("times")
-    default_tolerance = None
-    if isinstance(grid_spec, dict) and grid_spec.get("step") is not None:
-        default_tolerance = float(grid_spec["step"]) / 2.0
-
-        # "stop: null" means "carry on to the end of the runs". Only we can
-        # answer that, because it depends on the data. We take the end of the
-        # SHORTEST member, so that every member covers the whole grid.
-        if grid_spec.get("stop") is None:
-            ends = [float(prior.table(index)["TIME"].max())
-                    for index in range(len(prior))]
-            shortest = min(ends)
-            start = float(grid_spec.get("start") or 0.0)
-            step = float(grid_spec["step"])
-            # Round down to a whole number of steps so the last time is on
-            # the grid and inside every member's reported range.
-            steps = int((shortest - start) // step)
-            grid_spec = dict(grid_spec)
-            grid_spec["stop"] = start + steps * step
-            if verbose:
-                print(f"\n  'stop: null' resolved to {grid_spec['stop']:g} days "
-                      f"(shortest member ends at {shortest:g}; "
-                      f"longest at {max(ends):g})")
-
-    match = prior_settings.get("match", "nearest")
-    tolerance = prior_settings.get("tolerance", default_tolerance)
-
-    obs_settings = dict(settings.get(OBS_SECTION) or {})
-    obs_settings.setdefault("match", match)
-    obs_settings.setdefault("tolerance", tolerance)
-
-    # "columns: obs_columns.txt" and "times: obs_times.txt" name files, and
-    # like every other path in the config they are meant relative to the
-    # config file - not to whatever folder you happen to run from.
-    for key in ("columns", "times"):
-        value = obs_settings.get(key)
-        if isinstance(value, str):
-            obs_settings[key] = str(resolve(value))
-
-    obs_config = ObservationConfig.from_dict(obs_settings, section=OBS_SECTION)
-
-    truth = settings.get("truth")
-    measured = settings.get("observations_file")
-
-    if truth and measured:
-        raise ValueError(
-            "The config gives both 'truth' and 'observations_file'. Use one: "
-            "'truth' perturbs a simulation case into synthetic observations, "
-            "'observations_file' uses measured data as it is."
-        )
-    if truth:
-        truth_path = resolve_data_file(truth, {".rsm"}, "truth")
-        if verbose:
-            print(f"  truth case: {truth_path.name}")
-        obs = ObservationSet.from_truth(truth_path, obs_config)
-        truth_used = truth_path
-    elif measured:
-        measured_path = resolve_data_file(
-            measured, {".csv", ".txt", ".xlsx", ".xls", ".tsv", ".dat"},
-            "observations_file")
-        if verbose:
-            print(f"  measured data: {measured_path.name}")
-        obs = ObservationSet.from_file(measured_path, obs_config)
-        truth_used = None
-    else:
-        raise KeyError(
-            "The config needs either 'truth: TRUE.RSM' (synthetic "
-            "observations) or 'observations_file: history.csv' (measured)."
-        )
-    if verbose:
-        print(obs.summary())
-
-    # ---- the state vector's grid ----------------------------------------
-    columns = prior_settings.get("columns")
-    if columns is None:
-        columns = list(obs.names)
-    else:
-        from observations import _load_list
-        if isinstance(columns, str):
-            columns = str(resolve(columns))
-        columns = _load_list(columns, "prior.columns")
-        # Everything observed must be predictable, so make sure it is there.
-        missing = [name for name in obs.names if name not in columns]
-        if missing:
-            columns = columns + missing
-            if verbose:
-                print(f"\n  added {len(missing)} observed column(s) to the "
-                      f"prior state vector: {missing[:4]}")
-
-    if verbose:
-        print()
-        print("=" * 68)
-        print("3. state vector")
-        print("=" * 68)
-
-    from observations import _resolve_times
-    times = _resolve_times(str(resolve(grid_spec))
-                           if isinstance(grid_spec, str) else grid_spec)
-
-    prior_columns_spec = prior_settings.get("columns")
-
-    if times is None:
-        times = prior.common_times(whole_days=True)
-        if verbose:
-            print(f"  times: automatic - {len(times)} whole-day times every "
-                  f"member reports, {times.min():g} to {times.max():g}")
-    else:
-        times = np.asarray([float(time) for time in times], dtype=float)
-        if verbose:
-            spec = grid_spec
-            shape = (f"grid {spec['start']}..{spec['stop']} step {spec['step']}"
-                     if isinstance(spec, dict) else "from the config")
-            print(f"  times: {len(times)} ({shape}), "
-                  f"{times.min():g} to {times.max():g}")
-    if verbose:
-        print(f"  match: {match}"
-              + (f", tolerance {tolerance:g} days" if tolerance else ""))
-
-    # The prior step's output: a self-describing object, so the
-    # assimilation needs nothing else from this side.
-    prior_data = prior.build(columns, times, match=match,
-                             tolerance=tolerance, verbose=verbose)
-    if verbose:
-        print(f"  prior matrix: {prior_data.values.shape} "
-              f"(n_state x n_members)")
-
-    # ---- assimilate ------------------------------------------------------
-    esmda_config = ESMDAConfig.from_dict(settings, section="esmda")
-    if verbose:
-        print()
-        print("=" * 68)
-        print("4. ES-MDA in data space")
-        print("=" * 68)
-
-    result = run_dsi_esmda(prior_data, obs, esmda_config, verbose=verbose,
-                           truth_source=truth_used)
-    result.prior_data = prior_data
-
-    # Plot defaults live in the config too, so the plotting functions can be
-    # called with nothing but the result.
-    plot_settings = dict(settings.get("plot") or {})
-    if "folder" in plot_settings:
-        plot_settings["folder"] = str(resolve(plot_settings["folder"]))
-    result.plot_settings = plot_settings
-
-    # ---- save ------------------------------------------------------------
-    output = dict(settings.get("output") or {})
-    out_folder = resolve(output.get("folder", "results"))
-    prefix = output.get("prefix", "dsi")
-
-    written = result.save(out_folder, prefix=prefix)
-    obs.to_csv(Path(out_folder) / f"{prefix}_d_obs.csv")
-    obs.to_vector_csv(Path(out_folder) / f"{prefix}_d_obs_vector.csv")
-
-    if verbose:
-        print()
-        print("=" * 68)
-        print("5. result")
-        print("=" * 68)
-        print(result.summary())
-        print("\nsaved:")
-        for path in written:
-            print("  ", path)
-        print("  ", Path(out_folder) / f"{prefix}_d_obs.csv")
-        print("  ", Path(out_folder) / f"{prefix}_d_obs_vector.csv")
-
-    return result
-
-
-# ===========================================================================
-# A config template
-# ===========================================================================
-_TEMPLATE_YAML = """\
-# ==========================================================================
-# study_config.yaml - one file for the whole DSI + ES-MDA study.
-#   python dsi_esmda.py study_config.yaml
-# Paths may be absolute, or relative to THIS file.
-# ==========================================================================
-
-# --------------------------------------------------------------------------
-# The prior ensemble: the RSM files of the runs you have already done.
-# --------------------------------------------------------------------------
-prior:
-  folder: "Priors"            # holds Model1.RSM ... Model100.RSM
-  pattern: "Model*.RSM"       # members are sorted by their number
-
-  # ---- THE TIME GRID YOU WANT ------------------------------------------
-  # Eclipse and OPM do not report on the dates you asked for: they report at
-  # the timesteps they converged on, and no two members agree. So YOU say
-  # which grid to extract, and how to line it up with what was reported.
-  times:
-    start: 0                  # days
-    stop: 3600
-    step: 30                  # every 30 days -> 121 times
-  # times: null               # or: every whole-day time all members report
-  # times: prior_times.txt    # or: a text file / an explicit list
-
-  match: nearest              # nearest | exact | interpolate
-                              #   nearest     take the closest reported time
-                              #               (real value, slightly shifted day)
-                              #   exact       insist the time is really there
-                              #   interpolate straight line between neighbours
-                              #               (exact day, computed value)
-  tolerance: 15               # days; how far 'nearest' may reach.
-                              # Half the step is a sensible choice.
-
-  columns: null               # null = the observed columns. Add more here
-                              # to forecast quantities you do not observe,
-                              # e.g. [FOPT, FWPT] for cumulative volumes.
-
-# --------------------------------------------------------------------------
-# Where the observations come from. Use exactly ONE of these two.
-# --------------------------------------------------------------------------
-truth: "TRUE.RSM"             # a truth case, perturbed into observations
-# observations_file: "history.csv"    # or real measured data, used as it is
-
-# --------------------------------------------------------------------------
-# The observations themselves - read by observations.py.
-# See CONFIG.md for every setting.
-# --------------------------------------------------------------------------
-observations:
-  error:
-    percent: 8.0              # sigma = 8 % of the value ...
-    absolute: 1.0             # ... plus 1.0, so a zero value cannot give
-                              # sigma = 0 and a singular Cd
-  seed: 42
-  columns: obs_columns.txt    # or an inline list
-  times: [360, 720, 1080, 1440, 1800]
-                              # A subset of the prior grid above. May also be
-                              # a text file, or its own {start, stop, step}.
-  match: nearest              # matched the same way as the prior; if you
-  tolerance: 15               # leave these out, the prior's setting is used
-
-# --------------------------------------------------------------------------
-# The assimilation.
-# --------------------------------------------------------------------------
-esmda:
-  n_assimilations: 4          # Na: the correction is applied in 4 steps
-  alpha: [9.3333, 7.0, 4.0, 2.0]
-                              # One inflation factor per step.
-                              # sum(1/alpha) MUST be 1.0:
-                              #   1/9.3333 + 1/7 + 1/4 + 1/2 = 1.0000
-                              # Set alpha: null to use [Na, Na, ...], which
-                              # is always valid.
-  seed: 1234                  # seed for the observation perturbations
-  ridge: 1.0e-10              # numerical safety on the solve
-  clip_negative: true         # rates cannot be negative
-
-# --------------------------------------------------------------------------
-# Where results go.
-# --------------------------------------------------------------------------
-output:
-  folder: "results"
-  prefix: "dsi"
-"""
-
-
-def write_template(path="study_config.yaml"):
-    """Write a commented starter config for the whole study."""
-    path = Path(path)
-    path.write_text(_TEMPLATE_YAML, encoding="utf-8")
-    return path
-
-
-# ===========================================================================
-#     python dsi_esmda.py study_config.yaml
-#     python dsi_esmda.py --template study_config.yaml
-# ===========================================================================
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  python dsi_esmda.py <study_config.yaml>")
-        print("  python dsi_esmda.py --template [out.yaml]")
-        sys.exit(1)
-
-    if sys.argv[1] == "--template":
-        target = sys.argv[2] if len(sys.argv) > 2 else "study_config.yaml"
-        print("Wrote", write_template(target))
-        sys.exit(0)
-
-    run_study(sys.argv[1])
