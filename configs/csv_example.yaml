@@ -1,0 +1,67 @@
+prior:
+  type: csv
+  folder: ../data/prior_csv
+  pattern: "summary_*.csv"
+  separator: ";"
+  time_column: DATE
+
+  times:
+    start: 0
+    stop: null
+    step: 30
+
+  match: nearest
+  tolerance: 15
+
+observations:
+  mode: truth
+
+  source:
+    type: csv
+    path: ../data/True_model/summary_0.csv
+
+  time_column: DATE
+
+  columns:
+    - WOPR:A1
+    - WOPR:A2
+    - WOPR:A3
+    - WOPR:A4
+    - WOPR:A5
+
+  times:
+    - 150
+    - 300
+    - 390
+    - 510
+    - 660
+
+  match: nearest
+  tolerance: 15
+
+  error:
+    percent: 8.0
+    absolute: 1.0
+
+  seed: 42
+
+esmda:
+  iterations: 4
+  alpha:
+    - 9.3333
+    - 7.0
+    - 4.0
+    - 2.0
+  seed: 1234
+  clip_negative: true
+
+output:
+  folder: ../results
+
+plot:
+  folder: ../results/plots
+  percentiles:
+    - 5
+    - 95
+  spaghetti: true
+  dpi: 150
