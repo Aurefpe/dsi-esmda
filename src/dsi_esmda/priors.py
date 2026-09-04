@@ -13,7 +13,7 @@ folder, for example
 
 QUICK USE
 ---------
-    from priors import PriorEnsemble
+    from dsi_esmda.priors import PriorEnsemble
 
     prior = PriorEnsemble.from_folder(r"...\\Priors")
     print(prior)                       # PriorEnsemble(100 members)
@@ -72,37 +72,15 @@ def _member_sort_key(path):
 
 
 def _import_rsm_file_class():
-    """Find the RSMFile class, whatever the reader's file is called.
-
-    Python matches a module name to the file name exactly, so rsm_reader.py
-    and RSM_Reader.py are different modules to it - even on Windows, where
-    the file system does not care about capitals. We try the usual
-    spellings instead of insisting on one.
-    """
-    
+    """Import the RSM reader included in this package."""
     try:
         from .rsm_reader import RSMFile
-        return RSMFile
-    except ImportError:
-        pass
+    except ImportError as error:
+        raise ImportError(
+            "Could not import RSMFile from dsi_esmda.rsm_reader."
+        ) from error
 
-    import importlib
-    
-    for module_name in ("rsm_reader", "RSM_Reader", "RSM_reader",
-                        "rsm_Reader", "RSMReader", "RSM_READER"):
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError:
-            continue
-        rsm_file = getattr(module, "RSMFile", None)
-        if rsm_file is not None:
-            return rsm_file
-
-    raise ImportError(
-        "priors.py needs the RSM reader. Put rsm_reader.py in the same "
-        "folder as your script (any of these names works: rsm_reader.py, "
-        "RSM_Reader.py, RSMReader.py)."
-    )
+    return RSMFile
 
 
 def _prepare_table(table, member_name, time_column=None):
@@ -529,7 +507,7 @@ class PriorEnsemble:
         """
         # Shared with observations.py, so the prior and the observations are
         # sampled the same way and accept the same spellings of a name.
-        from observations import values_at_times, _match_column
+        from .observations import values_at_times, _match_column
 
         columns = list(columns)
         times = np.asarray([float(time) for time in times], dtype=float)
@@ -874,44 +852,3 @@ def load_priors_from_config(config, config_path="config.yaml"):
 # ---------------------------------------------------------------------------
 #     python priors.py <folder> [pattern]
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import sys
-
-    argv = sys.argv[1:]
-    if not argv:
-        print("Usage:")
-        print("  python priors.py <folder> [pattern]")
-        print("      list the members and what they have in common")
-        print("  python priors.py <folder> [pattern] --times obs_times.txt "
-              "[--truth TRUE.RSM] [--from 210] [--to 2400]")
-        print("      write the times usable as observation times")
-        sys.exit(1)
-
-    def take(flag, default=None):
-        if flag in argv:
-            position = argv.index(flag)
-            value = argv[position + 1]
-            del argv[position:position + 2]
-            return value
-        return default
-
-    times_out = take("--times")
-    truth = take("--truth")
-    start = take("--from")
-    stop = take("--to")
-
-    folder = argv[0]
-    pattern = argv[1] if len(argv) > 1 else "*.RSM"
-    prior = PriorEnsemble.from_folder(folder, pattern)
-
-    print(prior)
-    print("member order:", ", ".join(prior.names[:6]),
-          "..." if len(prior) > 6 else "")
-    prior.describe()
-
-    if times_out:
-        path, times = prior.write_common_times(
-            times_out, also=truth, whole_days=True, start=start, stop=stop)
-        print(f"\nWrote {len(times)} usable observation times to {path}")
-        print("  ", ", ".join(f"{time:g}" for time in times[:12]),
-              "..." if len(times) > 12 else "")
