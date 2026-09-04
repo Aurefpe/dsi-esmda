@@ -1,0 +1,18 @@
+# ==========================================================================
+# .gitattributes - how Git should treat particular files.
+#
+# Git stores text files with LF line endings inside the repository and can
+# convert them on checkout. "text=auto" lets Git decide what counts as text
+# and normalise it. This is what stops the "LF will be replaced by CRLF"
+# warning, and more importantly it stops a Linux collaborator from opening a
+# pull request in which every single line looks changed.
+# ==========================================================================
+* text=auto
+
+# Data and binaries: never convert, never try to diff as text.
+# "-text" means "this is not text, leave the bytes exactly alone".
+*.csv  -text
+*.RSM  -text
+*.pkl  -text
+*.png  binary
+*.npz  binary
