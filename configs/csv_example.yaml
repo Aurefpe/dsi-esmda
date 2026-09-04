@@ -46,12 +46,11 @@ observations:
   seed: 42
 
 esmda:
-  iterations: 4
+  n_assimilations: 4
+
   alpha:
-    - 9.3333
-    - 7.0
-    - 4.0
-    - 2.0
+    [9.3333,  7.0, 4.0, 2.0]
+
   seed: 1234
   clip_negative: true
 
