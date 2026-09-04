@@ -15,10 +15,15 @@ venv/
 # Generated results
 results/
 
-# Private reservoir data
-data/**/*.csv
-data/**/*.pkl
-data/**/*.RSM
+# Reservoir data.
+# The prior ensemble and the truth case ARE published: they are what makes
+# this repository runnable by someone who just cloned it. Everything else
+# under data/ is excluded, so a confidential case dropped into the folder
+# later can never be committed by accident.
+data/*
+!data/README.md
+!data/prior_csv/
+!data/True_model/
 
 # Keep the data documentation
 !data/README.md
