@@ -60,7 +60,13 @@ __version__ = "0.1.0"
 # exactly what you want. Wrapping them in try/except would hide a typo and
 # turn it into a mysterious AttributeError somewhere far away.
 # ---------------------------------------------------------------------------
-from .config import load_config, resolve_path
+from .config import (
+    load_config,
+    read_config,
+    resolve_data_file,
+    resolve_path,
+    section,
+)
 
 from .rsm_reader import RSMBlock, RSMFile, read_rsm, rsm_to_csv
 
