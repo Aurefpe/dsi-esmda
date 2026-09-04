@@ -104,7 +104,8 @@ from .esmda import (
 __all__ = [
     "__version__",
     # config
-    "load_config", "resolve_path",
+    "load_config", "read_config", "resolve_data_file", "resolve_path",
+    "section",
     # reading .RSM files
     "RSMBlock", "RSMFile", "read_rsm", "rsm_to_csv",
     # observations
