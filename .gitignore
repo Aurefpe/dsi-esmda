@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Generated results
+results/
+
+# Private reservoir data
+data/**/*.csv
+data/**/*.pkl
+data/**/*.RSM
+
+# Keep the data documentation
+!data/README.md
