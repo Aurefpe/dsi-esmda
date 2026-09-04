@@ -1,6 +1,6 @@
 """
-dsi_esmda.py
-============
+esmda.py
+========
 
 DSI + ES-MDA: history matching carried out entirely in DATA SPACE.
 
@@ -49,7 +49,26 @@ WHAT YOU GET
 
 EVERYTHING IS SET IN THE CONFIG FILE
 ------------------------------------
-    python dsi_esmda.py study_config.yaml
+The whole study is four calls, and each one takes the same config file:
+
+    from dsi_esmda import PriorEnsemble, ObservationSet, run_dsi_esmda
+    from dsi_esmda.plots import plot_all
+
+    config = "configs/csv_example.yaml"
+
+    prior        = PriorEnsemble.from_config_file(config)   # 1
+    observations = ObservationSet.from_config_file(config)  # 2
+    results      = run_dsi_esmda(prior, observations, config)   # 3
+    plot_all(results, config)                               # 4
+
+or, the same thing from a terminal:
+
+    python -m dsi_esmda.esmda configs/csv_example.yaml
+
+There is deliberately no `run_study` wrapper. Those four lines ARE the
+workflow: each step's output is the next step's input, and any of them can
+be stopped at and inspected. A wrapper would be a second way to do the same
+thing, and the two would drift apart.
 
     prior:
       folder: "Priors"
@@ -82,14 +101,15 @@ is not identical to those papers - so do not describe results from this file
 as "DSI with Gaussian transform".
 """
 
-import json
 import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from .observations import ObservationConfig, ObservationSet, SECTION as OBS_SECTION
+from .config import read_config
+from .observations import (ObservationSet, values_at_times, _as_dataframe,
+                           _load_list, _match_column, _resolve_times)
 from .priors import PriorEnsemble
 
 
@@ -291,6 +311,9 @@ class DSIResult:
         # Plot defaults taken from the config file's "plot" section, so the
         # plotting functions need no arguments from you.
         self.plot_settings = {}
+        # Files written by run_dsi_esmda when the config named an output
+        # folder. Empty when nothing was saved.
+        self.saved = []
 
     # -- shapes ------------------------------------------------------------
     @property
@@ -409,10 +432,7 @@ class DSIResult:
         if source is None:
             return None
 
-        from .observations import _as_dataframe, values_at_times
         table = _as_dataframe(source)
-
-        from .observations import _match_column
         found = _match_column(name, list(table.columns))
         # Draw truth only where truth data actually exist.  ObservationSet
         # stores the selected history points (for example 150..660 days),
@@ -551,15 +571,10 @@ def _as_esmda_config(config, section="esmda"):
     if isinstance(config, dict):
         return ESMDAConfig.from_dict(config, section=section), config, None
     if isinstance(config, (str, Path)):
+        # read_config does the "that is a folder" and "no such file" checks,
+        # so they are written once instead of once per module.
         path = Path(config)
-        if path.is_dir():
-            raise IsADirectoryError(
-                f"{path} is a folder, not a config file. Point at the file, "
-                f"e.g. {path / 'config.yaml'}."
-            )
-        if not path.exists():
-            raise FileNotFoundError(f"Cannot find the config file: {path}")
-        settings = _read_config(path)
+        settings = read_config(path)
         return (ESMDAConfig.from_dict(settings, section=section), settings,
                 path.resolve().parent)
     raise TypeError(
@@ -577,8 +592,6 @@ def _grid_from_settings(prior, obs, settings, config_folder, verbose=True):
     Used when you hand run_dsi_esmda a PriorEnsemble and a config file: the
     grid is described in the config, so nothing has to be passed by hand.
     """
-    from .observations import _load_list, _resolve_times
-
     def resolve(value):
         candidate = Path(str(value))
         if candidate.is_absolute() or config_folder is None:
@@ -663,37 +676,17 @@ def _unpack_prior(prior, columns, times, members):
                 members if members is not None else prior.names)
 
     if columns is None or times is None:                        # bare array
-        # The commonest cause is a stale priors.py: `prior` is a
-        # PriorEnsemble from an older copy of the module, which has neither
-        # build() nor matrix(), so we could not recognise it. Say so, rather
-        # than blaming the caller.
-        looks_like_ensemble = any(hasattr(prior, name)
-                                  for name in ("tables", "paths", "names",
-                                               "common_times"))
-        if looks_like_ensemble:
-            raise ValueError(
-                f"The prior you passed is a {type(prior).__name__} from an "
-                "OUT-OF-DATE priors.py: it has no build() or matrix() method, "
-                "so its data cannot be read.\n"
-                "Replace priors.py with the current version (it must define "
-                "PriorData and PriorEnsemble.build), then restart the Python "
-                "kernel - Spyder's 'Reloaded modules' does not always pick up "
-                "a new class.\n"
-                "As a stopgap you can pass the matrix and its labels "
-                "directly:\n"
-                "    M = prior.matrix(obs.names, times)\n"
-                "    run_dsi_esmda(M, obs, config, columns=obs.names, "
-                "times=times)"
-            )
         raise ValueError(
-            "A plain prior matrix needs columns= and times= so its rows can "
-            "be interpreted. PriorEnsemble.build(...) carries them for you."
+            f"A plain {type(prior).__name__} carries no labels, so columns= "
+            "and times= are needed to interpret its rows. "
+            "PriorEnsemble.build(columns, times) returns a PriorData that "
+            "carries them for you, which is the easier route."
         )
     return prior, columns, times, members
 
 
 def run_dsi_esmda(prior, obs, config, columns=None, times=None,
-                  verbose=True, members=None, truth_source=None):
+                  verbose=True, members=None, truth_source=None, save=None):
     """Run DSI + ES-MDA on the outputs of the prior and observation steps.
 
     This is step 3 of the workflow, and it consumes what the first two
@@ -711,16 +704,31 @@ def run_dsi_esmda(prior, obs, config, columns=None, times=None,
     obs : ObservationSet
         From observations.py. Supplies d_obs, sigma, and which quantities
         and times were measured.
-    config : ESMDAConfig
+    config : ESMDAConfig, or the path of the study config file
+        Given a path, the "prior" section supplies the time grid and the
+        columns, the "esmda" section the schedule, the "plot" section the
+        figure defaults, and the "output" section where results are written.
+    save : bool, optional
+        Write the results to the folder named in the config's "output"
+        section. Left out, it happens whenever the config has an "output"
+        section - so the four-call workflow saves without a fifth call.
+        save=False keeps everything in memory; the files written are always
+        listed, so nothing is written silently.
+
+    Returns
+    -------
+    DSIResult, with `result.saved` listing any files written.
     """
-    # Accept the older positional order run_dsi_esmda(M, columns, times,
-    # obs, config) so existing scripts keep working.
-    if isinstance(obs, (list, tuple, np.ndarray)) and columns is None:
-        prior, columns, times, obs, config = (
-            prior, obs, config, columns, times)
+    # An older calling order was run_dsi_esmda(M, columns, times, obs,
+    # config). Catch it here and say so, rather than failing later with a
+    # confusing error about an array that was expected to be an
+    # ObservationSet.
+    if isinstance(obs, (list, tuple, np.ndarray)):
         raise TypeError(
-            "run_dsi_esmda now takes (prior, obs, config). Either pass a "
-            "PriorData from PriorEnsemble.build(...), or name the arguments:\n"
+            "run_dsi_esmda takes (prior, obs, config); the second argument "
+            "must be an ObservationSet, not an array. Either pass a "
+            "PriorData from PriorEnsemble.build(...), or name the "
+            "arguments:\n"
             "    run_dsi_esmda(matrix, obs, config, columns=..., times=...)"
         )
 
@@ -892,7 +900,8 @@ def run_dsi_esmda(prior, obs, config, columns=None, times=None,
         if "folder" in plot_settings and config_folder is not None:
             folder = Path(str(plot_settings["folder"]))
             if not folder.is_absolute():
-                plot_settings["folder"] = str(config_folder / folder)
+                plot_settings["folder"] = str(
+                    (config_folder / folder).resolve())
         result.plot_settings = plot_settings
         if truth_source is None and settings.get("truth"):
             candidate = Path(str(settings["truth"]))
@@ -905,6 +914,35 @@ def run_dsi_esmda(prior, obs, config, columns=None, times=None,
                 candidate = found[0] if len(found) == 1 else None
             result.truth_source = candidate
     result.n_clipped = n_clipped
+
+    # ---- 4. save, when the config asks for it ---------------------------
+    # A function that computes AND writes files is a little unusual. It is
+    # done here because the config file is the single source of truth for
+    # the whole study: if it names an output folder, the results belong
+    # there. The alternative is a fifth call that is easy to forget, and a
+    # run whose posterior exists only until the interpreter closes.
+    result.saved = []
+    if save is None:
+        save = settings is not None and bool(settings.get("output"))
+
+    if save:
+        output = dict((settings or {}).get("output") or {})
+        folder = Path(str(output.get("folder", "results")))
+        if not folder.is_absolute() and config_folder is not None:
+            folder = (config_folder / folder).resolve()
+        prefix = str(output.get("prefix", "dsi"))
+
+        written = result.save(folder, prefix=prefix)
+        written.append(obs.to_csv(folder / f"{prefix}_d_obs.csv"))
+        written.append(obs.to_vector_csv(
+            folder / f"{prefix}_d_obs_vector.csv"))
+        result.saved = written
+
+        if verbose:
+            print(f"saved        : {len(written)} files in {folder}")
+            for path in written:
+                print(f"               {path.name}")
+
     return result
 
 
@@ -956,24 +994,82 @@ def _observation_rows(columns, times, obs):
     if len(rows) != obs.n_data:
         raise RuntimeError(
             f"Found {len(rows)} observation rows but d_obs has {obs.n_data}. "
-            "This is a bug in dsi_esmda.py, please report it."
+            "This is a bug in esmda.py, please report it."
         )
     return rows
 
 
 # ===========================================================================
-# Configuration helper used by ESMDAConfig and run_dsi_esmda
+# Configuration helper used by ESMDAConfig, run_dsi_esmda and plots.py
 # ===========================================================================
-def _read_config(path):
-    path = Path(path)
-    text = path.read_text(encoding="utf-8")
-    if path.suffix.lower() in (".yaml", ".yml"):
-        try:
-            import yaml
-        except ImportError as error:
-            raise ImportError(
-                "Reading a YAML config needs PyYAML: pip install pyyaml"
-            ) from error
-        return yaml.safe_load(text)
-    return json.loads(text)
+# The reading itself lives in config.py, so exactly one place in the package
+# knows how a config file is opened. The private name is kept because
+# plots.py and ESMDAConfig.from_file already call it.
+_read_config = read_config
 
+
+# ===========================================================================
+# The command line
+# ===========================================================================
+def main(argv=None):
+    """Run a study from a terminal, and optionally plot it.
+
+        python -m dsi_esmda.esmda configs/csv_example.yaml
+
+    Add this to pyproject.toml to get a real `dsi-esmda` command after
+    `pip install -e .`:
+
+        [project.scripts]
+        dsi-esmda = "dsi_esmda.esmda:main"
+
+    Returns the process exit code, which is what a console script needs.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="dsi-esmda",
+        description="DSI + ES-MDA history matching from one config file.")
+    parser.add_argument("config", help="the study config (.yaml or .json)")
+    parser.add_argument("--no-plots", action="store_true",
+                        help="run the assimilation but write no figures")
+    parser.add_argument("--quiet", action="store_true",
+                        help="do not print progress")
+    arguments = parser.parse_args(argv)
+    verbose = not arguments.quiet
+
+    # Exactly the four calls from the module docstring. The command line is
+    # a thin wrapper around the same public API, not a separate code path -
+    # so if it works, the four-line script works too.
+    prior = PriorEnsemble.from_config_file(arguments.config)
+    if verbose:
+        print(prior)
+
+    obs = ObservationSet.from_config_file(arguments.config)
+    if verbose:
+        print(obs.summary())
+        print()
+
+    result = run_dsi_esmda(prior, obs, arguments.config, verbose=verbose)
+    if verbose:
+        print()
+        print(result.summary())
+
+    if not arguments.no_plots:
+        # "Agg" writes PNG files instead of opening windows, which is what
+        # you want on a server or in CI. It is chosen HERE, in the program,
+        # rather than inside plots.py: a library must not take that decision
+        # away from the code importing it.
+        import matplotlib
+        matplotlib.use("Agg")
+        from .plots import plot_all
+
+        figures = plot_all(result, config=arguments.config)
+        if not arguments.quiet:
+            where = figures[0].parent if figures else "(nowhere)"
+            print(f"\nwrote {len(figures)} figures to {where}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
