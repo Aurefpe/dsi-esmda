@@ -63,7 +63,7 @@ git clone https://github.com/Aurefpe/dsi-esmda.git
 cd dsi-esmda
 
 python -m venv .venv
-source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1          # Windows: .\.venv\Scripts\Activate.ps1
 
 pip install -e .
 ```
