@@ -73,6 +73,7 @@ from .rsm_reader import RSMBlock, RSMFile, read_rsm, rsm_to_csv
 from .observations import (
     ObservationConfig,
     ObservationSet,
+    describe_source,
     load_observations,
     match_times,
     time_grid,
@@ -109,8 +110,9 @@ __all__ = [
     # reading .RSM files
     "RSMBlock", "RSMFile", "read_rsm", "rsm_to_csv",
     # observations
-    "ObservationConfig", "ObservationSet", "load_observations",
-    "match_times", "time_grid", "unit_of", "values_at_times",
+    "ObservationConfig", "ObservationSet", "describe_source",
+    "load_observations", "match_times", "time_grid", "unit_of",
+    "values_at_times",
     # the prior ensemble
     "PriorData", "PriorEnsemble", "load_priors",
     # the assimilation

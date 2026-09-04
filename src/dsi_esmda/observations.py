@@ -100,12 +100,16 @@ convention, because it is what `DSI_Fun.compute_matrices` and
 `dobs.reshape(Nobs, nVar, order='F')` already assume.
 """
 
-import json
 import pickle
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# One place in the package knows how a config file is opened. Importing it
+# here rather than re-reading YAML locally means the folder guard and the
+# "not valid YAML" message apply everywhere, not just in config.py.
+from .config import read_config
 
 
 # The title of our section inside the big config file. Everything else in
@@ -355,6 +359,22 @@ class ObservationConfig:
                 "Only 'percent' and 'absolute' are allowed."
             )
 
+        # "mode" and "source" say WHERE the observations come from. They are
+        # consumed by ObservationSet.from_config_file, not by the error
+        # model, so they are dropped here rather than rejected as unknown.
+        # Without this, a config written in the nested form
+        #
+        #     observations:
+        #       mode: truth
+        #       source: {type: csv, path: data/True.csv}
+        #       error: {percent: 8.0}
+        #
+        # could ONLY be read by from_config_file: ObservationConfig.from_file,
+        # load_observations and ObservationSet.load would all refuse it with
+        # "Unknown keys in the config: ['mode', 'source']".
+        settings.pop("mode", None)
+        settings.pop("source", None)
+
         known = {"columns", "times", "seed", "unit_factors", "time_column",
                  "match", "tolerance"}
         unknown = set(settings) - known
@@ -365,7 +385,7 @@ class ObservationConfig:
 
     @classmethod
     def from_file(cls, path, section=SECTION):
-        """Read the config from a .json, .yaml or .yml file.
+        """Read the config from a .yaml, .yml or .json file.
 
         Only the "observations" section of the file is read; any other
         section (for example "esmda") is left alone, so one file can
@@ -373,28 +393,12 @@ class ObservationConfig:
 
         A `columns:` or `times:` that names a text file is looked for NEXT
         TO THE CONFIG FILE, not in whatever folder you happen to run from.
+
+        The file itself is opened by config.read_config, so there is exactly
+        one place in the package that knows how a config is read.
         """
         path = Path(path)
-        if path.is_dir():
-            raise IsADirectoryError(
-                f"{path} is a folder, not a config file. Point at the file "
-                f"itself, e.g. {path / 'config.yaml'}."
-            )
-        if not path.exists():
-            raise FileNotFoundError(f"Cannot find the config file: {path}")
-        text = path.read_text(encoding="utf-8")
-
-        if path.suffix.lower() in (".yaml", ".yml"):
-            try:
-                import yaml            # PyYAML, install with: pip install pyyaml
-            except ImportError as error:
-                raise ImportError(
-                    "Reading a YAML config needs PyYAML. Either run "
-                    "'pip install pyyaml' or use a .json config instead."
-                ) from error
-            settings = yaml.safe_load(text)
-        else:
-            settings = json.loads(text)
+        settings = read_config(path)
 
         # A file name given for columns/times is meant relative to the config
         # file. Resolve it here, so the config works from any folder.
@@ -734,16 +738,6 @@ def values_at_times(table, columns, wanted, match="exact", tolerance=None,
     return values, info
 
 
-def _rows_at_times(table, time_column, wanted_times, match="exact",
-                   tolerance=None):
-    """Row positions of `wanted_times`. Kept for the internal callers."""
-    rows, _, _ = match_times(np.asarray(table[time_column], dtype=float),
-                             wanted_times, match, tolerance)
-    if rows is None:
-        raise ValueError("_rows_at_times cannot be used with interpolation.")
-    return [int(row) for row in rows]
-
-
 # ===========================================================================
 # CLASS 2: the observation set - the thing you actually hand to ES-MDA
 # ===========================================================================
@@ -819,7 +813,7 @@ class ObservationSet:
                 absolute: 1
         """
         config_path = Path(config_path).resolve()
-        settings = _read_settings(config_path)
+        settings = read_config(config_path)
         section = dict(settings.get(SECTION, {}) or {})
 
         mode = str(section.pop("mode", "truth")).lower()
@@ -1273,28 +1267,6 @@ def load_observations(source, config_path, section=SECTION):
 # ===========================================================================
 # Internal helpers (you do not need to call these)
 # ===========================================================================
-def _read_settings(path):
-    """Read the complete JSON or YAML study configuration."""
-    if not path.is_file():
-        raise FileNotFoundError(f"Cannot find the config file: {path}")
-
-    text = path.read_text(encoding="utf-8")
-    if path.suffix.lower() in {".yaml", ".yml"}:
-        try:
-            import yaml
-        except ImportError as error:
-            raise ImportError(
-                "Reading YAML needs PyYAML: pip install pyyaml"
-            ) from error
-        settings = yaml.safe_load(text)
-    else:
-        settings = json.loads(text)
-
-    if not isinstance(settings, dict):
-        raise ValueError("The configuration must contain a mapping.")
-    return settings
-
-
 def _load_truth_source(path, source_type, key=None):
     """Return a truth DataFrame or an RSM/CSV path selected by the config."""
     aliases = {"pkl": "pickle", "yml": "yaml"}
@@ -1395,15 +1367,6 @@ def _read_table(path):
     # sep=None together with engine="python" lets pandas sniff the
     # delimiter, so commas, semicolons, tabs and spaces all work.
     return pd.read_csv(path, sep=None, engine="python")
-
-
-# The RSM reader may have been saved under any of these file names. Python
-# matches a module name to the file name exactly, so "rsm_reader.py" and
-# "RSM_Reader.py" are two different modules to it - even on Windows, where
-# the file system itself does not care about capitals. We therefore try the
-# spellings people actually use instead of insisting on one.
-_RSM_MODULE_NAMES = ("rsm_reader", "RSM_Reader", "RSM_reader", "rsm_Reader",
-                     "RSMReader", "RSM_READER")
 
 
 def _import_rsm_file_class():
@@ -1513,195 +1476,6 @@ def _check_no_missing(table, source):
               "'times'/'columns', or leave both out of the config so they "
               "are skipped automatically."
         )
-
-
-# ===========================================================================
-# Config templates you can copy
-# ===========================================================================
-# Two shapes, because the two sources need slightly different advice:
-#   "truth" - you own a truth simulation case (TRUE.RSM) and want it
-#             perturbed into synthetic observations
-#   "file"  - you already have measured history in a csv/txt/xlsx file
-#
-# YAML is used for the annotated version, because JSON cannot hold comments.
-# The JSON version below is identical, minus the explanations.
-
-_TEMPLATE_TRUTH_YAML = """\
-# ===========================================================================
-# study_config.yaml - settings for the whole history-matching study.
-# Each top-level title is one section. observations.py reads ONLY the
-# "observations" section and ignores the rest, so your ES-MDA settings can
-# live in the same file.
-# ===========================================================================
-
-observations:
-
-  # -------------------------------------------------------------------------
-  # REQUIRED. The measurement error, which becomes sigma and then
-  #   Cd = diag(sigma**2).
-  # sigma = percent/100 * |value| + absolute
-  # Give percent, absolute, or both. This is the only thing that cannot be
-  # read from the data: it describes your gauges, not your file.
-  # -------------------------------------------------------------------------
-  error:
-    percent: 5.0        # 5 % of the true value
-    absolute: 1.0       # plus 1.0 in the column's own unit (SM3/DAY, BARSA...)
-                        # Keep a small `absolute` if any observed value can be
-                        # exactly 0 (a water rate before breakthrough, a
-                        # cumulative at time 0). A purely relative error would
-                        # give sigma = 0 there and Cd could not be inverted.
-
-  # -------------------------------------------------------------------------
-  # OPTIONAL. Random seed for the perturbation. The same seed always gives
-  # the same synthetic observations, which is what makes a study repeatable.
-  # -------------------------------------------------------------------------
-  seed: 42
-
-  # -------------------------------------------------------------------------
-  # OPTIONAL. Which quantities to observe, IN THE ORDER THEY WILL APPEAR IN
-  # d_obs. This order must match the order you use to build the simulated
-  # ensemble matrix - nothing can detect a mismatch, it just gives wrong
-  # answers quietly.
-  #
-  # Names are the ones rsm_reader.py produces: a field keyword on its own
-  # (FOPT, FWPT, FPR) or KEYWORD:WELL for a well (WOPR:PROD005, WBHP:NA1A).
-  #
-  # Leave this out entirely to observe EVERY column of the RSM file.
-  # To see what is available:   python observations.py --list TRUE.RSM
-  # -------------------------------------------------------------------------
-  columns:
-    - FOPT
-    - FWPT
-    - WOPR:PROD005
-    - WBHP:NA1A
-  # columns: obs_columns.txt     # ... or keep the list in a text file
-
-  # -------------------------------------------------------------------------
-  # OPTIONAL. The observation times, in days.
-  #
-  # These MUST be report times that exist in TRUE.RSM. The reader refuses to
-  # interpolate, because inventing data the simulator never reported is a
-  # silent source of error; if a time is missing you get an error naming the
-  # nearest available one.
-  #     python observations.py --list TRUE.RSM     shows every report time
-  #
-  # Leave this out to use every report time in the file.
-  # -------------------------------------------------------------------------
-  times:
-    - 360.0
-    - 1020.0
-    - 3540.0
-  # times: obs_times.txt         # ... or keep the list in a text file
-
-  # -------------------------------------------------------------------------
-  # OPTIONAL, rarely needed with an RSM file.
-  #   unit_factors  per-column multiplier applied on reading, for unit
-  #                 conversion, e.g. {FOPT: 0.159} for bbl -> SM3
-  #   time_column   name of the time column; omitted = auto-detect
-  # -------------------------------------------------------------------------
-  # unit_factors:
-  #   FOPT: 0.159
-  # time_column: TIME
-
-
-# ===========================================================================
-# Not read by observations.py - your own ES-MDA settings.
-# ===========================================================================
-esmda:
-  n_assimilations: 4
-  alpha: [9.3333, 7.0, 4.0, 2.0]
-  ensemble_size: 100
-"""
-
-_TEMPLATE_FILE_YAML = """\
-# ===========================================================================
-# study_config.yaml - for observations that are ALREADY MEASURED and stored
-# in a .csv / .txt / .xlsx file. Layout of that file ("wide"):
-#
-#     TIME,FOPR,FWPR,WOPR:NA1A,WBHP:NA1A
-#     2160,4769,76,862,185.5
-#     2526,14979,481,1483,187.4
-#
-# observations.py reads ONLY the "observations" section of this file.
-# ===========================================================================
-
-observations:
-
-  # REQUIRED - see the truth template for the full explanation.
-  # sigma = percent/100 * |value| + absolute
-  error:
-    percent: 5.0
-    absolute: 1.0
-
-  # OPTIONAL. Leave `columns` out to observe every numeric column of the
-  # file, and `times` out to use every time where all those columns have a
-  # value (rows with a gap are skipped and listed in obs.skipped_times).
-  #     python observations.py --list my_observations.csv
-  # columns: obs_columns.txt
-  # times: obs_times.txt
-
-  # OPTIONAL. Unit conversion applied when the file is read.
-  # unit_factors:
-  #   FOPR: 0.159        # bbl/day -> SM3/day
-
-  # OPTIONAL. Only needed if the time column has an unusual name.
-  # time_column: TIME
-
-
-esmda:
-  n_assimilations: 4
-  alpha: [9.3333, 7.0, 4.0, 2.0]
-  ensemble_size: 100
-"""
-
-EXAMPLE_CONFIG = {
-    "observations": {
-        "error": {"percent": 5.0, "absolute": 1.0},
-        "seed": 42,
-        "columns": ["FOPT", "FWPT", "WOPR:PROD005", "WBHP:NA1A"],
-        "times": [360.0, 1020.0, 3540.0],
-    },
-    "esmda": {
-        "n_assimilations": 4,
-        "alpha": [9.3333, 7.0, 4.0, 2.0],
-        "ensemble_size": 100,
-    },
-}
-
-MINIMAL_CONFIG = {
-    "observations": {
-        "error": {"percent": 5.0, "absolute": 1.0},
-        "seed": 42,
-    },
-    "esmda": {
-        "n_assimilations": 4,
-        "alpha": [9.3333, 7.0, 4.0, 2.0],
-        "ensemble_size": 100,
-    },
-}
-
-
-def write_example_config(path="study_config.yaml", kind="truth"):
-    """Write a starter config file you can then edit.
-
-    kind : "truth"   for perturbing a TRUE.RSM case
-           "file"    for observations already measured and stored in a file
-           "minimal" for the shortest config that works (error only)
-
-    A .yaml / .yml path gets the fully commented template; a .json path gets
-    the same settings without the comments, because JSON has no comment
-    syntax.
-    """
-    path = Path(path)
-    if path.suffix.lower() in (".yaml", ".yml"):
-        template = {"truth": _TEMPLATE_TRUTH_YAML,
-                    "file": _TEMPLATE_FILE_YAML,
-                    "minimal": _TEMPLATE_FILE_YAML}[kind]
-        path.write_text(template, encoding="utf-8")
-    else:
-        settings = MINIMAL_CONFIG if kind == "minimal" else EXAMPLE_CONFIG
-        path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    return path
 
 
 def describe_source(source):
