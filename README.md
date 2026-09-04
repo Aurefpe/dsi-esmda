@@ -603,4 +603,4 @@ any benchmark data.
 
 ## Author
 
-**Auref Rostamian** — University of Stavanger
+**Auref Rostamian**  PhD., University of Stavanger
